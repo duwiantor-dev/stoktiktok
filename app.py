@@ -477,6 +477,7 @@ with col1:
         "Upload Mass Update TikTok (bisa banyak)",
         type=["xlsx"],
         accept_multiple_files=True,
+        key="mass_uploads",
     )
 
 with col2:
@@ -484,6 +485,7 @@ with col2:
         "Upload Pricelist (multi-sheet)",
         type=["xlsx", "XLSX"],
         accept_multiple_files=False,
+        key="pl_upload",
     )
 
 st.caption("Catatan: SKU yang mengandung '+ADDON' akan pakai stok BASE SKU (sebelum '+').")
@@ -495,24 +497,29 @@ if "tokos" not in st.session_state:
 if "areas" not in st.session_state:
     st.session_state.areas = []
 
-load_btn = st.button("Load Data (Ambil daftar TOKO & AREA)", type="secondary")
+# === (AMAN MULTI USER) tombol diberi key + try/except supaya tidak crash global
+load_btn = st.button("Load Data (Ambil daftar TOKO & AREA)", type="secondary", key="btn_load_data")
 
 if load_btn:
     if not pl_upload:
         st.error("Upload Pricelist dulu.")
     else:
-        with st.spinner("Membaca pricelist..."):
-            lookup, tokos, areas = build_stock_lookup_from_pricelist(pl_upload.getvalue())
-            st.session_state.stock_lookup = lookup
-            st.session_state.tokos = tokos
-            st.session_state.areas = areas
-        st.success(f"OK. Ditemukan {len(tokos)} TOKO dan {len(areas)} AREA.")
-
+        try:
+            with st.spinner("Membaca pricelist..."):
+                lookup, tokos, areas = build_stock_lookup_from_pricelist(pl_upload.getvalue())
+                st.session_state.stock_lookup = lookup
+                st.session_state.tokos = tokos
+                st.session_state.areas = areas
+            st.success(f"OK. Ditemukan {len(tokos)} TOKO dan {len(areas)} AREA.")
+        except Exception as e:
+            st.error(f"Pricelist tidak valid: {e}")
+            st.stop()
 
 mode = st.radio(
     "Pilih sumber stok untuk update",
     options=["Stok Nasional (TOT)", "Stok Area", "Stok Toko"],
     horizontal=True,
+    key="mode_stock_source",
 )
 
 chosen_tokos: Set[str] = set()
@@ -522,10 +529,12 @@ if st.session_state.stock_lookup is None:
     st.info("Klik 'Load Data' dulu supaya daftar TOKO & AREA muncul.")
 else:
     if mode == "Stok Area":
-        chosen_tokos = set(st.multiselect("Pilih TOKO (boleh banyak)", options=st.session_state.tokos))
+        chosen_tokos = set(
+            st.multiselect("Pilih TOKO (boleh banyak)", options=st.session_state.tokos, key="ms_tokos")
+        )
     elif mode == "Stok Toko":
         st.caption("Masukkan Kode Toko (pemisah spasi). Contoh: RAM 2A ; JKT 3B")
-        pairs_text = st.text_area("PILIH BANYAK (pisah dengan enter)", value="", height=120)
+        pairs_text = st.text_area("PILIH BANYAK (pisah dengan enter)", value="", height=120, key="ta_pairs")
         chosen_pairs = parse_pairs_space(pairs_text)
 
 with st.expander("DEBUG (cek kolom & match SKU)", expanded=False):
@@ -557,7 +566,7 @@ with st.expander("DEBUG (cek kolom & match SKU)", expanded=False):
         st.write("Upload Mass Update dulu untuk debug.")
 
 
-run = st.button("Proses Update Stok", type="primary")
+run = st.button("Proses Update Stok", type="primary", key="btn_run")
 
 if run:
     if not mass_uploads:
@@ -591,6 +600,7 @@ if run:
             data=out_bytes,
             file_name="hasil_update_stok_tiktok.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_result",
         )
 
         if issues_df is not None and len(issues_df) > 0:
