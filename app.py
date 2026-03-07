@@ -87,9 +87,6 @@ def sheet_range_between(sheetnames: List[str], start: str, end: str) -> List[str
 
 
 def norm_area_name(area_raw) -> str:
-    """
-    AREA sekarang berupa teks seperti JKT, RAM, RHC, dst.
-    """
     return _norm_str(area_raw).upper()
 
 
@@ -137,10 +134,6 @@ def find_tot_col(ws: Worksheet, header_row_hint: int) -> Tuple[int, int]:
 
 
 def build_merged_lookup_map(ws: Worksheet) -> Dict[Tuple[int, int], object]:
-    """
-    Flatten merged cells sekali saja.
-    Jauh lebih cepat daripada scan merged range berulang.
-    """
     merged_map: Dict[Tuple[int, int], object] = {}
     for mr in ws.merged_cells.ranges:
         top_left_val = ws.cell(mr.min_row, mr.min_col).value
@@ -163,10 +156,6 @@ def build_area_meta(
     area_row: int,
     start_col: int,
 ) -> Dict[int, str]:
-    """
-    col -> AREA_NAME
-    AREA di row 3, misalnya: JKT, RAM, RHC, dll
-    """
     col_area: Dict[int, str] = {}
 
     for c in range(start_col, ws.max_column + 1):
@@ -180,13 +169,6 @@ def build_area_meta(
 
 
 def build_stock_lookup_from_sheet_fast(ws: Worksheet, sheet_name: str):
-    """
-    Final parser:
-    - cari row header KODEBARANG / KODE BARANG
-    - cari kolom TOT
-    - AREA selalu row 3
-    - TOKO diabaikan
-    """
     AREA_ROW = 3
 
     header_row = find_header_row_by_exact(ws, "KODEBARANG", scan_rows=150)
@@ -249,7 +231,6 @@ def build_stock_lookup_from_sheet_fast(ws: Worksheet, sheet_name: str):
 def build_stock_lookup_from_pricelist_cached(pl_bytes: bytes):
     wb = openpyxl.load_workbook(BytesIO(pl_bytes), data_only=True, read_only=False)
 
-    # Rule khusus LAPTOP
     for s in wb.sheetnames:
         if s.upper() == "LAPTOP":
             delete_coming_block_in_laptop(wb[s])
@@ -423,11 +404,9 @@ def write_output_from_template(template_bytes: bytes, changed_rows_all: List[Lis
 
     data_start, _, _ = find_tiktok_columns_normal(out_ws)
 
-    # Hapus data lama
     if out_ws.max_row >= data_start:
         out_ws.delete_rows(data_start, out_ws.max_row - data_start + 1)
 
-    # Tulis hasil baru
     for idx, row_vals in enumerate(changed_rows_all, start=data_start):
         for c, val in enumerate(row_vals, start=1):
             out_ws.cell(idx, c).value = val
@@ -490,7 +469,6 @@ def process_mass_update_stock_tiktok_fast(
 st.set_page_config(page_title="Update Stok TikTok (Mass Update)", layout="wide")
 st.title("Update Stok TikTok (Mass Update)")
 
-# Session state
 if "stock_lookup" not in st.session_state:
     st.session_state.stock_lookup = None
 if "areas" not in st.session_state:
@@ -524,7 +502,6 @@ with col2:
 
 st.caption("Catatan: SKU yang mengandung '+ADDON' akan pakai stok BASE SKU (sebelum '+').")
 
-# Guard
 if mass_uploads:
     if len(mass_uploads) > MAX_MASS_FILES:
         st.error(f"Maksimal {MAX_MASS_FILES} file mass update per proses.")
@@ -535,7 +512,6 @@ if mass_uploads:
         st.error(f"Total ukuran file terlalu besar: {total_mb:.1f} MB. Maksimal {MAX_TOTAL_UPLOAD_MB} MB.")
         st.stop()
 
-# Load pricelist
 load_btn = st.button("Load Data Pricelist", type="secondary", key="btn_load_data")
 
 if load_btn:
@@ -551,24 +527,24 @@ if load_btn:
             st.session_state.areas = areas
 
         st.success(f"OK. Ditemukan {len(areas)} AREA.")
-
     except Exception as e:
         st.error(f"Pricelist tidak valid: {e}")
         st.stop()
 
-# Mode
-mode = st.radio(
-    "Pilih sumber stok untuk update",
-    options=["Stok Nasional (TOT)", "Stok Area"],
-    horizontal=True,
-    key="mode_stock_source",
-)
-
+mode = None
 chosen_areas: Set[str] = set()
+can_show_run_button = False
 
 if st.session_state.stock_lookup is None:
     st.info("Klik 'Load Data Pricelist' dulu supaya daftar AREA muncul.")
 else:
+    mode = st.radio(
+        "Pilih sumber stok untuk update",
+        options=["Stok Nasional (TOT)", "Stok Area"],
+        horizontal=True,
+        key="mode_stock_source",
+    )
+
     if mode == "Stok Area":
         chosen_areas = set(
             st.multiselect(
@@ -577,43 +553,14 @@ else:
                 key="ms_areas",
             )
         )
+        if chosen_areas:
+            can_show_run_button = True
+    elif mode == "Stok Nasional (TOT)":
+        can_show_run_button = True
 
-# Debug
-with st.expander("DEBUG (cek kolom & match SKU)", expanded=False):
-    if mass_uploads:
-        try:
-            f0 = mass_uploads[0]
-            wb = openpyxl.load_workbook(BytesIO(f0.getvalue()), read_only=True, data_only=False)
-            ws = wb[wb.sheetnames[0]]
-            ds, sc, qc = find_tiktok_columns_readonly(ws)
-
-            st.write("Mass Update -> data_start:", ds, "| sku_col:", sc, "| qty_col:", qc)
-
-            sample_mass = []
-            for idx, row in enumerate(ws.iter_rows(min_row=ds, values_only=True), start=1):
-                if idx > 30:
-                    break
-                sv = norm_sku(row[sc - 1] if len(row) >= sc else None)
-                if sv:
-                    sample_mass.append(sv)
-
-            st.write("Sample SKU Mass Update:", sample_mass[:10])
-
-            if st.session_state.stock_lookup is not None:
-                pl_keys = list(st.session_state.stock_lookup.keys())
-                st.write("Sample SKU Pricelist:", pl_keys[:10])
-                inter = set(sample_mass) & set(pl_keys)
-                st.write("Match count (sample 30 baris):", len(inter))
-
-            wb.close()
-
-        except Exception as e:
-            st.write("DEBUG error:", str(e))
-    else:
-        st.write("Upload Mass Update dulu untuk debug.")
-
-# Run
-run = st.button("Proses Update Stok", type="primary", key="btn_run")
+run = False
+if can_show_run_button:
+    run = st.button("Proses Update Stok", type="primary", key="btn_run")
 
 if run:
     if not mass_uploads:
@@ -653,7 +600,6 @@ if run:
     except Exception as e:
         st.error(str(e))
 
-# Result
 if st.session_state.result_bytes is not None:
     st.subheader("Hasil Proses")
 
@@ -675,10 +621,3 @@ if st.session_state.result_bytes is not None:
     if st.session_state.issues_df is not None and len(st.session_state.issues_df) > 0:
         st.subheader("Issues Report")
         st.dataframe(st.session_state.issues_df, use_container_width=True)
-
-# Reset
-if st.button("Reset hasil", key="btn_reset_result"):
-    st.session_state.result_bytes = None
-    st.session_state.issues_df = None
-    st.session_state.stats = None
-    st.success("Hasil proses di-reset.")
