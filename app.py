@@ -21,7 +21,10 @@ MAX_TOTAL_UPLOAD_MB = 200
 def _norm_str(x) -> str:
     if x is None:
         return ""
-    return str(x).strip()
+    s = str(x)
+    s = s.replace("\xa0", " ")
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
 
 
 def norm_sku(v) -> str:
@@ -66,7 +69,7 @@ def get_first_sheet(wb: openpyxl.Workbook) -> Worksheet:
 
 
 def find_row_contains(ws: Worksheet, needle: str, scan_rows: int = 300) -> Optional[int]:
-    needle_u = needle.upper()
+    needle_u = _norm_str(needle).upper()
     for r in range(1, min(ws.max_row, scan_rows) + 1):
         for c in range(1, ws.max_column + 1):
             v = _norm_str(ws.cell(r, c).value).upper()
@@ -76,7 +79,7 @@ def find_row_contains(ws: Worksheet, needle: str, scan_rows: int = 300) -> Optio
 
 
 def sheet_range_between(sheetnames: List[str], start: str, end: str) -> List[str]:
-    up = [s.upper() for s in sheetnames]
+    up = [_norm_str(s).upper() for s in sheetnames]
     if start.upper() not in up or end.upper() not in up:
         raise ValueError(f"Sheet range tidak valid. Pastikan ada '{start}' dan '{end}'.")
     i0 = up.index(start.upper())
@@ -111,10 +114,10 @@ def delete_coming_block_in_laptop(ws: Worksheet):
 
 
 def find_header_row_by_exact(ws: Worksheet, header_text: str, scan_rows: int = 150) -> Optional[int]:
-    target = header_text.strip().upper()
+    target = _norm_str(header_text).upper()
     for r in range(1, min(ws.max_row, scan_rows) + 1):
         for c in range(1, ws.max_column + 1):
-            v = _norm_str(ws.cell(r, c).value).strip().upper()
+            v = _norm_str(ws.cell(r, c).value).upper()
             if v == target:
                 return r
     return None
@@ -122,12 +125,12 @@ def find_header_row_by_exact(ws: Worksheet, header_text: str, scan_rows: int = 1
 
 def find_tot_col(ws: Worksheet, header_row_hint: int) -> Tuple[int, int]:
     for c in range(1, ws.max_column + 1):
-        if _norm_str(ws.cell(header_row_hint, c).value).strip().upper() == "TOT":
+        if _norm_str(ws.cell(header_row_hint, c).value).upper() == "TOT":
             return header_row_hint, c
 
     for r in range(1, min(12, ws.max_row) + 1):
         for c in range(1, ws.max_column + 1):
-            if _norm_str(ws.cell(r, c).value).strip().upper() == "TOT":
+            if _norm_str(ws.cell(r, c).value).upper() == "TOT":
                 return r, c
 
     raise ValueError("Kolom 'TOT' tidak ketemu.")
@@ -179,7 +182,7 @@ def build_stock_lookup_from_sheet_fast(ws: Worksheet, sheet_name: str):
 
     sku_col = None
     for c in range(1, ws.max_column + 1):
-        v = _norm_str(ws.cell(header_row, c).value).strip().upper()
+        v = _norm_str(ws.cell(header_row, c).value).upper()
         if v in ("KODEBARANG", "KODE BARANG"):
             sku_col = c
             break
@@ -232,7 +235,7 @@ def build_stock_lookup_from_pricelist_cached(pl_bytes: bytes):
     wb = openpyxl.load_workbook(BytesIO(pl_bytes), data_only=True, read_only=False)
 
     for s in wb.sheetnames:
-        if s.upper() == "LAPTOP":
+        if _norm_str(s).upper() == "LAPTOP":
             delete_coming_block_in_laptop(wb[s])
             break
 
@@ -263,17 +266,25 @@ def find_tiktok_columns_normal(ws: Worksheet) -> Tuple[int, int, int]:
     sku_col = None
     qty_col = None
 
+    qty_headers = {
+        "KUANTITAS",
+        "JUMLAH DI SHOP LOCATION",
+        "QUANTITY",
+    }
+
     for c in range(1, ws.max_column + 1):
-        v = _norm_str(ws.cell(HEADER_ROW, c).value).strip().upper()
+        v = _norm_str(ws.cell(HEADER_ROW, c).value).upper()
         if v in ("SKU PENJUAL", "SELLER SKU"):
             sku_col = c
-        if v in ("KUANTITAS", "JUMLAH DI SHOP LOCATION"):
+        if v in qty_headers:
             qty_col = c
 
     if not sku_col:
         raise ValueError("Kolom SKU tidak ketemu. Pastikan header 'SKU Penjual' / 'Seller SKU' ada di row 3.")
     if not qty_col:
-        raise ValueError("Kolom Kuantitas tidak ketemu. Pastikan header 'Kuantitas' ada di row 3.")
+        raise ValueError(
+            "Kolom stok tidak ketemu. Pastikan header 'Kuantitas', 'Jumlah di Shop Location', atau 'Quantity' ada di row 3."
+        )
 
     return DATA_START_ROW, sku_col, qty_col
 
@@ -285,18 +296,26 @@ def find_tiktok_columns_readonly(ws) -> Tuple[int, int, int]:
     sku_col = None
     qty_col = None
 
+    qty_headers = {
+        "KUANTITAS",
+        "JUMLAH DI SHOP LOCATION",
+        "QUANTITY",
+    }
+
     row_vals = list(ws.iter_rows(min_row=HEADER_ROW, max_row=HEADER_ROW, values_only=True))[0]
     for idx, val in enumerate(row_vals, start=1):
-        v = _norm_str(val).strip().upper()
+        v = _norm_str(val).upper()
         if v in ("SKU PENJUAL", "SELLER SKU"):
             sku_col = idx
-        if v in ("KUANTITAS", "JUMLAH DI SHOP LOCATION"):
+        if v in qty_headers:
             qty_col = idx
 
     if not sku_col:
         raise ValueError("Kolom SKU tidak ketemu. Pastikan header 'SKU Penjual' / 'Seller SKU' ada di row 3.")
     if not qty_col:
-        raise ValueError("Kolom Kuantitas tidak ketemu. Pastikan header 'Kuantitas' ada di row 3.")
+        raise ValueError(
+            "Kolom stok tidak ketemu. Pastikan header 'Kuantitas', 'Jumlah di Shop Location', atau 'Quantity' ada di row 3."
+        )
 
     return DATA_START_ROW, sku_col, qty_col
 
@@ -621,5 +640,3 @@ if st.session_state.result_bytes is not None:
     if st.session_state.issues_df is not None and len(st.session_state.issues_df) > 0:
         st.subheader("Issues Report")
         st.dataframe(st.session_state.issues_df, use_container_width=True)
-
-
