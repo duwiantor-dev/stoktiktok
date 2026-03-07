@@ -22,7 +22,6 @@ def _norm_str(x) -> str:
 
 
 def norm_sku(v) -> str:
-    """Normalize SKU for matching across files."""
     s = _norm_str(v).upper()
     if not s:
         return ""
@@ -138,7 +137,7 @@ def parse_pairs_space(text: str) -> Set[Tuple[str, str]]:
 
 
 # ============================================================
-# Pricelist processing (KUNCI: kolom SKU = KODEBARANG)
+# Pricelist processing
 # ============================================================
 def delete_coming_block_in_laptop(ws: Worksheet):
     r_start = find_row_contains(ws, "COMING", scan_rows=600)
@@ -158,10 +157,6 @@ def find_header_row_by_exact(ws: Worksheet, header_text: str, scan_rows: int = 1
 
 
 def find_tot_col(ws: Worksheet, header_row_hint: int) -> Tuple[int, int]:
-    """
-    Return (header_row_used, tot_col)
-    Try find TOT on header_row_hint; if not found, scan rows 1..12.
-    """
     for c in range(1, ws.max_column + 1):
         if _norm_str(ws.cell(header_row_hint, c).value).strip().upper() == "TOT":
             return header_row_hint, c
@@ -203,12 +198,6 @@ def detect_area_and_toko_rows(ws: Worksheet, header_row: int) -> Tuple[int, int]
 
 
 def build_stock_lookup_from_sheet(ws: Worksheet, sheet_name: str):
-    """
-    KUNCI:
-    - Cari header row yang mengandung "KODEBARANG"
-    - SKU_COL adalah kolom "KODEBARANG" (fallback "KODE BARANG")
-    - TOT must exist
-    """
     header_row = find_header_row_by_exact(ws, "KODEBARANG", scan_rows=150)
     if header_row is None:
         header_row = find_header_row_by_exact(ws, "KODE BARANG", scan_rows=150)
@@ -218,15 +207,9 @@ def build_stock_lookup_from_sheet(ws: Worksheet, sheet_name: str):
     sku_col = None
     for c in range(1, ws.max_column + 1):
         v = _norm_str(ws.cell(header_row, c).value).strip().upper()
-        if v == "KODEBARANG":
+        if v in ("KODEBARANG", "KODE BARANG"):
             sku_col = c
             break
-    if sku_col is None:
-        for c in range(1, ws.max_column + 1):
-            v = _norm_str(ws.cell(header_row, c).value).strip().upper()
-            if v == "KODE BARANG":
-                sku_col = c
-                break
     if sku_col is None:
         raise ValueError(f"[{sheet_name}] Kolom 'KODEBARANG'/'KODE BARANG' tidak ditemukan di header row {header_row}.")
 
@@ -285,8 +268,9 @@ def build_stock_lookup_from_sheet(ws: Worksheet, sheet_name: str):
     return sku_map, sorted(tokos), sorted(areas)
 
 
-def build_stock_lookup_from_pricelist(pl_bytes: bytes):
-    wb = openpyxl.load_workbook(BytesIO(pl_bytes), data_only=True)
+@st.cache_data(show_spinner=False)
+def build_stock_lookup_from_pricelist_cached(pl_bytes: bytes):
+    wb = openpyxl.load_workbook(BytesIO(pl_bytes), data_only=True, read_only=False)
 
     for s in wb.sheetnames:
         if s.upper() == "LAPTOP":
@@ -312,16 +296,9 @@ def build_stock_lookup_from_pricelist(pl_bytes: bytes):
 
 
 # ============================================================
-# TikTok Mass Update layout (fixed)
+# TikTok layout
 # ============================================================
 def find_tiktok_columns(ws: Worksheet) -> Tuple[int, int, int]:
-    """
-    TikTok rules:
-    - header row = 3
-    - data starts at row = 6
-    - SKU header: 'SKU Penjual' or 'Seller SKU'
-    - Stock header: 'Kuantitas'
-    """
     HEADER_ROW = 3
     DATA_START_ROW = 6
 
@@ -362,7 +339,7 @@ def pick_stock_value(
     if mode == "Stok Nasional (TOT)":
         return tot if tot is not None else None
 
-    if mode == "Stok Area":  # SUM by TOKO
+    if mode == "Stok Area":
         if not chosen_tokos:
             return None
         s, hit = 0, False
@@ -372,7 +349,7 @@ def pick_stock_value(
                 hit = True
         return s if hit else None
 
-    if mode == "Stok Toko":  # SUM by TOKO+AREA
+    if mode == "Stok Toko":
         if not chosen_pairs:
             return None
         s, hit = 0, False
@@ -391,31 +368,37 @@ def process_mass_update_stock_tiktok(
     mode: str,
     chosen_tokos: Set[str],
     chosen_pairs: Set[Tuple[str, str]],
-) -> Tuple[bytes, pd.DataFrame]:
+) -> Tuple[bytes, pd.DataFrame, Dict[str, int]]:
     issues = []
+    stats = {
+        "files_total": len(mass_files),
+        "rows_scanned": 0,
+        "rows_written": 0,
+        "rows_unchanged": 0,
+        "rows_unmatched": 0,
+    }
 
     first_name, first_bytes = mass_files[0]
     out_wb = openpyxl.load_workbook(BytesIO(first_bytes))
     out_ws = get_first_sheet(out_wb)
 
     data_start, sku_col, qty_col = find_tiktok_columns(out_ws)
+    max_col = out_ws.max_column
 
-    # Clear existing data rows
+    # Simpan style row template dari row data pertama
+    template_wb = openpyxl.load_workbook(BytesIO(first_bytes))
+    template_ws = get_first_sheet(template_wb)
+    template_style_row = data_start
+
+    # Hapus data lama TANPA insert row berulang
     if out_ws.max_row >= data_start:
         out_ws.delete_rows(data_start, out_ws.max_row - data_start + 1)
 
-    # Style template row
-    tmp_wb = openpyxl.load_workbook(BytesIO(first_bytes))
-    tmp_ws = get_first_sheet(tmp_wb)
-    template_style_row = data_start
-    max_col = tmp_ws.max_column
-
     write_row = data_start
-    updated = 0
 
     for fname, fbytes in mass_files:
         try:
-            wb = openpyxl.load_workbook(BytesIO(fbytes))
+            wb = openpyxl.load_workbook(BytesIO(fbytes), data_only=False, read_only=False)
             ws = get_first_sheet(wb)
 
             data_start2, sku_col2, qty_col2 = find_tiktok_columns(ws)
@@ -425,8 +408,9 @@ def process_mass_update_stock_tiktok(
                 if not sku_full:
                     continue
 
-                old_qty = to_int_or_none(ws.cell(r, qty_col2).value)
+                stats["rows_scanned"] += 1
 
+                old_qty = to_int_or_none(ws.cell(r, qty_col2).value)
                 new_qty = pick_stock_value(
                     sku_full=sku_full,
                     stock_lookup=stock_lookup,
@@ -434,26 +418,30 @@ def process_mass_update_stock_tiktok(
                     chosen_tokos=chosen_tokos,
                     chosen_pairs=chosen_pairs,
                 )
+
                 if new_qty is None:
+                    stats["rows_unmatched"] += 1
                     continue
 
                 if old_qty is not None and int(old_qty) == int(new_qty):
+                    stats["rows_unchanged"] += 1
                     continue
 
-                out_ws.insert_rows(write_row, 1)
-                copy_row_style(tmp_ws, template_style_row, out_ws, write_row, max_col)
+                # Tulis langsung ke row tujuan, jangan insert_rows
+                copy_row_style(template_ws, template_style_row, out_ws, write_row, max_col)
 
                 for c in range(1, max_col + 1):
                     out_ws.cell(write_row, c).value = ws.cell(r, c).value
 
                 out_ws.cell(write_row, qty_col).value = int(new_qty)
-                updated += 1
+
+                stats["rows_written"] += 1
                 write_row += 1
 
         except Exception as e:
             issues.append({"file": fname, "reason": f"Gagal proses file: {e}"})
 
-    if updated == 0:
+    if stats["rows_written"] == 0:
         issues.append({"file": "", "reason": "Tidak ada baris berubah / tidak ada SKU yang match."})
 
     buf = BytesIO()
@@ -461,7 +449,7 @@ def process_mass_update_stock_tiktok(
     out_bytes = buf.getvalue()
 
     issues_df = pd.DataFrame(issues, columns=["file", "reason"])
-    return out_bytes, issues_df
+    return out_bytes, issues_df, stats
 
 
 # ============================================================
@@ -469,6 +457,22 @@ def process_mass_update_stock_tiktok(
 # ============================================================
 st.set_page_config(page_title="Update Stok TikTok (Mass Update)", layout="wide")
 st.title("Update Stok TikTok (Mass Update)")
+
+# Session init
+if "stock_lookup" not in st.session_state:
+    st.session_state.stock_lookup = None
+if "tokos" not in st.session_state:
+    st.session_state.tokos = []
+if "areas" not in st.session_state:
+    st.session_state.areas = []
+if "result_bytes" not in st.session_state:
+    st.session_state.result_bytes = None
+if "issues_df" not in st.session_state:
+    st.session_state.issues_df = None
+if "stats" not in st.session_state:
+    st.session_state.stats = None
+if "last_result_name" not in st.session_state:
+    st.session_state.last_result_name = "hasil_update_stok_tiktok.xlsx"
 
 col1, col2 = st.columns(2)
 
@@ -483,21 +487,13 @@ with col1:
 with col2:
     pl_upload = st.file_uploader(
         "Upload Pricelist (multi-sheet)",
-        type=["xlsx", "XLSX"],
+        type=["xlsx"],
         accept_multiple_files=False,
         key="pl_upload",
     )
 
 st.caption("Catatan: SKU yang mengandung '+ADDON' akan pakai stok BASE SKU (sebelum '+').")
 
-if "stock_lookup" not in st.session_state:
-    st.session_state.stock_lookup = None
-if "tokos" not in st.session_state:
-    st.session_state.tokos = []
-if "areas" not in st.session_state:
-    st.session_state.areas = []
-
-# === (AMAN MULTI USER) tombol diberi key + try/except supaya tidak crash global
 load_btn = st.button("Load Data (Ambil daftar TOKO & AREA)", type="secondary", key="btn_load_data")
 
 if load_btn:
@@ -506,7 +502,8 @@ if load_btn:
     else:
         try:
             with st.spinner("Membaca pricelist..."):
-                lookup, tokos, areas = build_stock_lookup_from_pricelist(pl_upload.getvalue())
+                pl_bytes = pl_upload.getvalue()
+                lookup, tokos, areas = build_stock_lookup_from_pricelist_cached(pl_bytes)
                 st.session_state.stock_lookup = lookup
                 st.session_state.tokos = tokos
                 st.session_state.areas = areas
@@ -565,7 +562,6 @@ with st.expander("DEBUG (cek kolom & match SKU)", expanded=False):
     else:
         st.write("Upload Mass Update dulu untuk debug.")
 
-
 run = st.button("Proses Update Stok", type="primary", key="btn_run")
 
 if run:
@@ -585,8 +581,10 @@ if run:
 
     try:
         with st.spinner("Sedang proses update stok TikTok..."):
-            mass_files = [(f.name, f.read()) for f in mass_uploads]
-            out_bytes, issues_df = process_mass_update_stock_tiktok(
+            # PAKAI getvalue(), jangan read()
+            mass_files = [(f.name, f.getvalue()) for f in mass_uploads]
+
+            out_bytes, issues_df, stats = process_mass_update_stock_tiktok(
                 mass_files=mass_files,
                 stock_lookup=st.session_state.stock_lookup,
                 mode=mode,
@@ -594,18 +592,43 @@ if run:
                 chosen_pairs=chosen_pairs,
             )
 
-        st.success("Selesai proses update stok.")
-        st.download_button(
-            "Download hasil (XLSX)",
-            data=out_bytes,
-            file_name="hasil_update_stok_tiktok.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_result",
-        )
+            # Simpan hasil ke session_state supaya tidak hilang setelah rerun/download
+            st.session_state.result_bytes = out_bytes
+            st.session_state.issues_df = issues_df
+            st.session_state.stats = stats
+            st.session_state.last_result_name = "hasil_update_stok_tiktok.xlsx"
 
-        if issues_df is not None and len(issues_df) > 0:
-            st.subheader("Issues Report")
-            st.dataframe(issues_df, use_container_width=True)
+        st.success("Selesai proses update stok.")
 
     except Exception as e:
         st.error(str(e))
+
+# Render hasil dari session, jadi tidak hilang setelah download
+if st.session_state.result_bytes is not None:
+    st.subheader("Hasil Proses")
+
+    if st.session_state.stats:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("File diproses", st.session_state.stats["files_total"])
+        c2.metric("Baris discan", st.session_state.stats["rows_scanned"])
+        c3.metric("Baris diupdate", st.session_state.stats["rows_written"])
+        c4.metric("SKU tidak match", st.session_state.stats["rows_unmatched"])
+
+    st.download_button(
+        "Download hasil (XLSX)",
+        data=st.session_state.result_bytes,
+        file_name=st.session_state.last_result_name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="dl_result",
+    )
+
+    if st.session_state.issues_df is not None and len(st.session_state.issues_df) > 0:
+        st.subheader("Issues Report")
+        st.dataframe(st.session_state.issues_df, use_container_width=True)
+
+# Tombol reset manual
+if st.button("Reset hasil", key="btn_reset_result"):
+    st.session_state.result_bytes = None
+    st.session_state.issues_df = None
+    st.session_state.stats = None
+    st.success("Hasil proses di-reset.")
