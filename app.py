@@ -267,7 +267,7 @@ def find_tiktok_columns_normal(ws: Worksheet) -> Tuple[int, int, int]:
         v = _norm_str(ws.cell(HEADER_ROW, c).value).strip().upper()
         if v in ("SKU PENJUAL", "SELLER SKU"):
             sku_col = c
-        if v == "KUANTITAS", "Jumlah di Shop Location":
+        if v in ("KUANTITAS", "JUMLAH DI SHOP LOCATION"):
             qty_col = c
 
     if not sku_col:
@@ -290,7 +290,7 @@ def find_tiktok_columns_readonly(ws) -> Tuple[int, int, int]:
         v = _norm_str(val).strip().upper()
         if v in ("SKU PENJUAL", "SELLER SKU"):
             sku_col = idx
-        if v == "KUANTITAS", "Jumlah di Shop Location":
+        if v in ("KUANTITAS", "JUMLAH DI SHOP LOCATION"):
             qty_col = idx
 
     if not sku_col:
@@ -621,4 +621,5 @@ if st.session_state.result_bytes is not None:
     if st.session_state.issues_df is not None and len(st.session_state.issues_df) > 0:
         st.subheader("Issues Report")
         st.dataframe(st.session_state.issues_df, use_container_width=True)
+
 
