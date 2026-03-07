@@ -13,7 +13,6 @@ from openpyxl.worksheet.worksheet import Worksheet
 # ============================================================
 MAX_MASS_FILES = 50
 MAX_TOTAL_UPLOAD_MB = 200
-AREA_CODE_RE = re.compile(r"^\d+[A-Z]$")  # 2A, 3B, 19S, dst
 
 
 # ============================================================
@@ -87,13 +86,11 @@ def sheet_range_between(sheetnames: List[str], start: str, end: str) -> List[str
     return sheetnames[i0:i1 + 1]
 
 
-def norm_area_default(area_raw: str) -> str:
-    a = _norm_str(area_raw).upper()
-    if not a:
-        return ""
-    if a.endswith("A"):
-        return a[:-1]
-    return a
+def norm_area_name(area_raw) -> str:
+    """
+    AREA sekarang berupa teks seperti JKT, RAM, RHC, dst.
+    """
+    return _norm_str(area_raw).upper()
 
 
 def total_upload_size_mb(files: List) -> float:
@@ -107,7 +104,7 @@ def total_upload_size_mb(files: List) -> float:
 
 
 # ============================================================
-# PRICE LIST PARSING (FAST - TOT + AREA ONLY)
+# PRICE LIST PARSING (TOT + AREA ONLY)
 # ============================================================
 def delete_coming_block_in_laptop(ws: Worksheet):
     r_start = find_row_contains(ws, "COMING", scan_rows=600)
@@ -139,37 +136,11 @@ def find_tot_col(ws: Worksheet, header_row_hint: int) -> Tuple[int, int]:
     raise ValueError("Kolom 'TOT' tidak ketemu.")
 
 
-def detect_area_row(ws: Worksheet, header_row: int) -> int:
-    candidates = []
-    if ws.max_row >= 3:
-        candidates.append(3)
-    if ws.max_row >= header_row + 1:
-        candidates.append(header_row + 1)
-    if ws.max_row >= 4:
-        candidates.append(4)
-    if ws.max_row >= header_row + 2:
-        candidates.append(header_row + 2)
-
-    def score_area_row(r: int) -> int:
-        cnt = 0
-        for c in range(1, ws.max_column + 1):
-            v = _norm_str(ws.cell(r, c).value).upper()
-            if v and AREA_CODE_RE.match(v):
-                cnt += 1
-        return cnt
-
-    best_row = None
-    best_score = -1
-    for r in candidates:
-        sc = score_area_row(r)
-        if sc > best_score:
-            best_score = sc
-            best_row = r
-
-    return best_row if best_row else 3
-
-
 def build_merged_lookup_map(ws: Worksheet) -> Dict[Tuple[int, int], object]:
+    """
+    Flatten merged cells sekali saja.
+    Jauh lebih cepat daripada scan merged range berulang.
+    """
     merged_map: Dict[Tuple[int, int], object] = {}
     for mr in ws.merged_cells.ranges:
         top_left_val = ws.cell(mr.min_row, mr.min_col).value
@@ -188,29 +159,36 @@ def get_cell_or_merged_value(ws: Worksheet, merged_map: Dict[Tuple[int, int], ob
 
 def build_area_meta(
     ws: Worksheet,
+    merged_map: Dict[Tuple[int, int], object],
     area_row: int,
     start_col: int,
-    merged_map: Dict[Tuple[int, int], object],
 ) -> Dict[int, str]:
     """
-    col -> normalized AREA
+    col -> AREA_NAME
+    AREA di row 3, misalnya: JKT, RAM, RHC, dll
     """
     col_area: Dict[int, str] = {}
+
     for c in range(start_col, ws.max_column + 1):
         area_raw = get_cell_or_merged_value(ws, merged_map, area_row, c)
-        area_s = _norm_str(area_raw).upper()
-        if not area_s:
+        area_name = norm_area_name(area_raw)
+        if not area_name:
             continue
-        if not AREA_CODE_RE.match(area_s):
-            continue
+        col_area[c] = area_name
 
-        area_n = norm_area_default(area_s)
-        if area_n:
-            col_area[c] = area_n
     return col_area
 
 
 def build_stock_lookup_from_sheet_fast(ws: Worksheet, sheet_name: str):
+    """
+    Final parser:
+    - cari row header KODEBARANG / KODE BARANG
+    - cari kolom TOT
+    - AREA selalu row 3
+    - TOKO diabaikan
+    """
+    AREA_ROW = 3
+
     header_row = find_header_row_by_exact(ws, "KODEBARANG", scan_rows=150)
     if header_row is None:
         header_row = find_header_row_by_exact(ws, "KODE BARANG", scan_rows=150)
@@ -223,18 +201,18 @@ def build_stock_lookup_from_sheet_fast(ws: Worksheet, sheet_name: str):
         if v in ("KODEBARANG", "KODE BARANG"):
             sku_col = c
             break
+
     if sku_col is None:
-        raise ValueError(f"[{sheet_name}] Kolom 'KODEBARANG'/'KODE BARANG' tidak ditemukan.")
+        raise ValueError(f"[{sheet_name}] Kolom 'KODEBARANG' / 'KODE BARANG' tidak ditemukan.")
 
     header_row_used, tot_col = find_tot_col(ws, header_row)
-    area_row = detect_area_row(ws, header_row_used)
 
     merged_map = build_merged_lookup_map(ws)
     col_area = build_area_meta(
         ws=ws,
-        area_row=area_row,
-        start_col=tot_col + 1,
         merged_map=merged_map,
+        area_row=AREA_ROW,
+        start_col=tot_col + 1,
     )
 
     sku_map: Dict[str, Dict] = {}
@@ -247,17 +225,17 @@ def build_stock_lookup_from_sheet_fast(ws: Worksheet, sheet_name: str):
             continue
 
         sku_key = norm_sku(sku)
-        if sku_key in ("TOTAL", "KODEBARANG", "KODEBARANG."):
+        if sku_key in ("TOTAL", "KODEBARANG", "KODE BARANG", "KODEBARANG."):
             continue
 
         tot_val = to_int_or_none(ws.cell(r, tot_col).value)
         by_area: Dict[str, int] = {}
 
-        for c, area_n in col_area.items():
+        for c, area_name in col_area.items():
             v = to_int_or_none(ws.cell(r, c).value)
             if v is None:
                 continue
-            by_area[area_n] = by_area.get(area_n, 0) + int(v)
+            by_area[area_name] = by_area.get(area_name, 0) + int(v)
 
         sku_map[sku_key] = {
             "TOT": tot_val,
@@ -271,6 +249,7 @@ def build_stock_lookup_from_sheet_fast(ws: Worksheet, sheet_name: str):
 def build_stock_lookup_from_pricelist_cached(pl_bytes: bytes):
     wb = openpyxl.load_workbook(BytesIO(pl_bytes), data_only=True, read_only=False)
 
+    # Rule khusus LAPTOP
     for s in wb.sheetnames:
         if s.upper() == "LAPTOP":
             delete_coming_block_in_laptop(wb[s])
@@ -278,23 +257,23 @@ def build_stock_lookup_from_pricelist_cached(pl_bytes: bytes):
 
     target_sheets = sheet_range_between(wb.sheetnames, "LAPTOP", "SER OTH CON")
 
-    merged: Dict[str, Dict] = {}
+    merged_lookup: Dict[str, Dict] = {}
     areas_all: Set[str] = set()
 
     for s in target_sheets:
         ws = wb[s]
         sku_map, areas = build_stock_lookup_from_sheet_fast(ws, s)
-        merged.update(sku_map)
+        merged_lookup.update(sku_map)
         areas_all |= set(areas)
 
-    if not merged:
+    if not merged_lookup:
         raise ValueError("Pricelist terbaca, tapi lookup stok kosong.")
 
-    return merged, sorted(areas_all)
+    return merged_lookup, sorted(areas_all)
 
 
 # ============================================================
-# TIKTOK LAYOUT
+# TIKTOK MASS UPDATE LAYOUT
 # ============================================================
 def find_tiktok_columns_normal(ws: Worksheet) -> Tuple[int, int, int]:
     HEADER_ROW = 3
@@ -349,6 +328,7 @@ def pick_stock_value(
 ) -> Optional[int]:
     base, _ = split_sku_addons(sku_full)
     base_key = norm_sku(base)
+
     if not base_key or base_key not in stock_lookup:
         return None
 
@@ -362,11 +342,14 @@ def pick_stock_value(
     if mode == "Stok Area":
         if not chosen_areas:
             return None
-        s, hit = 0, False
-        for area, v in by_area.items():
-            if area in chosen_areas:
+
+        s = 0
+        hit = False
+        for area_name, v in by_area.items():
+            if area_name in chosen_areas:
                 s += int(v)
                 hit = True
+
         return s if hit else None
 
     return None
@@ -434,18 +417,17 @@ def collect_changed_rows_from_mass_file(
     return changed_rows, stats
 
 
-def write_output_from_template(
-    template_bytes: bytes,
-    changed_rows_all: List[List[object]],
-) -> bytes:
+def write_output_from_template(template_bytes: bytes, changed_rows_all: List[List[object]]) -> bytes:
     out_wb = openpyxl.load_workbook(BytesIO(template_bytes))
     out_ws = get_first_sheet(out_wb)
 
     data_start, _, _ = find_tiktok_columns_normal(out_ws)
 
+    # Hapus data lama
     if out_ws.max_row >= data_start:
         out_ws.delete_rows(data_start, out_ws.max_row - data_start + 1)
 
+    # Tulis hasil baru
     for idx, row_vals in enumerate(changed_rows_all, start=data_start):
         for c, val in enumerate(row_vals, start=1):
             out_ws.cell(idx, c).value = val
@@ -464,6 +446,7 @@ def process_mass_update_stock_tiktok_fast(
 ) -> Tuple[bytes, pd.DataFrame, Dict[str, int]]:
     issues = []
     changed_rows_all: List[List[object]] = []
+
     stats_total = {
         "files_total": len(mass_files),
         "rows_scanned": 0,
@@ -497,6 +480,7 @@ def process_mass_update_stock_tiktok_fast(
 
     out_bytes = write_output_from_template(mass_files[0][1], changed_rows_all)
     issues_df = pd.DataFrame(issues, columns=["file", "reason"])
+
     return out_bytes, issues_df, stats_total
 
 
@@ -506,6 +490,7 @@ def process_mass_update_stock_tiktok_fast(
 st.set_page_config(page_title="Update Stok TikTok (Mass Update)", layout="wide")
 st.title("Update Stok TikTok (Mass Update)")
 
+# Session state
 if "stock_lookup" not in st.session_state:
     st.session_state.stock_lookup = None
 if "areas" not in st.session_state:
@@ -539,6 +524,7 @@ with col2:
 
 st.caption("Catatan: SKU yang mengandung '+ADDON' akan pakai stok BASE SKU (sebelum '+').")
 
+# Guard
 if mass_uploads:
     if len(mass_uploads) > MAX_MASS_FILES:
         st.error(f"Maksimal {MAX_MASS_FILES} file mass update per proses.")
@@ -549,6 +535,7 @@ if mass_uploads:
         st.error(f"Total ukuran file terlalu besar: {total_mb:.1f} MB. Maksimal {MAX_TOTAL_UPLOAD_MB} MB.")
         st.stop()
 
+# Load pricelist
 load_btn = st.button("Load Data Pricelist", type="secondary", key="btn_load_data")
 
 if load_btn:
@@ -564,10 +551,12 @@ if load_btn:
             st.session_state.areas = areas
 
         st.success(f"OK. Ditemukan {len(areas)} AREA.")
+
     except Exception as e:
         st.error(f"Pricelist tidak valid: {e}")
         st.stop()
 
+# Mode
 mode = st.radio(
     "Pilih sumber stok untuk update",
     options=["Stok Nasional (TOT)", "Stok Area"],
@@ -589,6 +578,7 @@ else:
             )
         )
 
+# Debug
 with st.expander("DEBUG (cek kolom & match SKU)", expanded=False):
     if mass_uploads:
         try:
@@ -622,6 +612,7 @@ with st.expander("DEBUG (cek kolom & match SKU)", expanded=False):
     else:
         st.write("Upload Mass Update dulu untuk debug.")
 
+# Run
 run = st.button("Proses Update Stok", type="primary", key="btn_run")
 
 if run:
@@ -662,6 +653,7 @@ if run:
     except Exception as e:
         st.error(str(e))
 
+# Result
 if st.session_state.result_bytes is not None:
     st.subheader("Hasil Proses")
 
@@ -684,6 +676,7 @@ if st.session_state.result_bytes is not None:
         st.subheader("Issues Report")
         st.dataframe(st.session_state.issues_df, use_container_width=True)
 
+# Reset
 if st.button("Reset hasil", key="btn_reset_result"):
     st.session_state.result_bytes = None
     st.session_state.issues_df = None
